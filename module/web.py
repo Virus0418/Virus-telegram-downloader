@@ -1,11 +1,15 @@
 """web ui for media download"""
 
 import datetime
+import hashlib
+import hmac
 import logging
 import os
+import secrets
 import threading
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask_login import LoginManager, UserMixin, current_user, login_user
 
 import utils
 from module.app import Application
@@ -33,7 +37,12 @@ log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
 
 _flask_app = Flask(__name__, static_folder='static', static_url_path='/static')
-_flask_app.secret_key = "tdl"
+# Replaced in configure_web_auth. Never the literal "tdl", and never written to disk.
+_flask_app.secret_key = secrets.token_hex(32)
+# Until init_web applies config, do not demand a password (the server is not up yet).
+_flask_app.config["LOGIN_DISABLED"] = True
+_flask_app.config["SESSION_COOKIE_HTTPONLY"] = True
+_flask_app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # Always reload templates from disk on each request — needed for NAS deployments
 # where index.html is updated by the deploy script without restarting the container.
 _flask_app.config["TEMPLATES_AUTO_RELOAD"] = True
@@ -43,6 +52,134 @@ _flask_app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 # Force Jinja to not cache (belt-and-suspenders: ensure auto-reload really works)
 _flask_app.jinja_env.auto_reload = True
 _flask_app.jinja_env.cache = {}
+
+# Login page and Flask static assets. Every other endpoint is gated below,
+# including JSON/XHR routes added later, so they cannot skip auth by omission.
+_PUBLIC_ENDPOINTS = frozenset({"login", "static"})
+_login_secret = ""
+
+_login_manager = LoginManager()
+_login_manager.login_view = "login"
+_login_manager.init_app(_flask_app)
+
+
+class User(UserMixin):
+    """Single WebUI operator. The password is config web_login_secret."""
+
+    def __init__(self):
+        self.sid = "root"
+
+    @property
+    def id(self):
+        return self.sid
+
+
+@_login_manager.user_loader
+def load_user(_user_id):
+    """Restore the session user. There is only one account."""
+    return User()
+
+
+def _session_secret(login_secret: str) -> str:
+    """Stable cookie key when login is configured, so sessions survive restarts.
+
+    Derived from web_login_secret; nothing new is stored in the repo or on disk.
+    When login is off, use a random per-process key (sessions are unused).
+    """
+    if login_secret and login_secret.strip():
+        return hashlib.sha256(
+            b"hermes-telegram-downloader.web.session.v1\0"
+            + login_secret.encode("utf-8")
+        ).hexdigest()
+    return secrets.token_hex(32)
+
+
+def configure_web_auth(login_secret) -> None:
+    """Apply web_login_secret. Empty / blank disables login (upstream behavior)."""
+    global _login_secret
+    if login_secret is None or login_secret is False:
+        text = ""
+    else:
+        text = str(login_secret)
+    _login_secret = text
+    enabled = bool(text.strip())
+    _flask_app.config["LOGIN_DISABLED"] = not enabled
+    _flask_app.secret_key = _session_secret(text if enabled else "")
+
+
+def _secret_matches(provided: str) -> bool:
+    """Constant-time compare against the configured login secret."""
+    expected = _login_secret
+    if not expected or not expected.strip() or provided is None:
+        return False
+    given = hashlib.sha256(str(provided).encode("utf-8")).digest()
+    wanted = hashlib.sha256(expected.encode("utf-8")).digest()
+    return hmac.compare_digest(given, wanted)
+
+
+def _safe_next(target) -> str:
+    """Only allow same-site relative redirects after login."""
+    if not target or not isinstance(target, str):
+        return url_for("index")
+    target = target.strip()
+    if (
+        not target.startswith("/")
+        or target.startswith("//")
+        or target.startswith("/\\")
+        or "\\" in target
+        or "://" in target
+    ):
+        return url_for("index")
+    path_only = target.split("?", 1)[0].rstrip("/") or "/"
+    if path_only == "/login":
+        return url_for("index")
+    return target
+
+
+def _wants_json() -> bool:
+    """True for fetch/XHR/JSON clients, false for a normal browser form."""
+    if request.is_json:
+        return True
+    if request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest":
+        return True
+    accept = request.headers.get("Accept", "")
+    return "application/json" in accept and "text/html" not in accept
+
+
+def _extract_password():
+    """Read the login secret from a JSON body or a form field. Never from the query string."""
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        if "password" not in data:
+            return None
+        value = data.get("password")
+        return None if value is None else str(value)
+    if "password" in request.form:
+        return request.form.get("password", "")
+    return None
+
+
+def _unauthorized_response():
+    """Block the view. Browser page loads redirect to /login; APIs get 401."""
+    accept = request.headers.get("Accept", "")
+    browser_page = request.method in ("GET", "HEAD") and (
+        request.path == "/" or "text/html" in accept
+    )
+    if browser_page:
+        return redirect(url_for("login", next=request.path))
+    return jsonify({"code": "0", "message": "login required"}), 401
+
+
+@_flask_app.before_request
+def _enforce_login():
+    """Require a session for every route except /login and /static when a secret is set."""
+    if _flask_app.config.get("LOGIN_DISABLED"):
+        return None
+    if request.endpoint in _PUBLIC_ENDPOINTS:
+        return None
+    if current_user.is_authenticated:
+        return None
+    return _unauthorized_response()
 
 
 def get_flask_app() -> Flask:
@@ -75,6 +212,7 @@ def init_web(app: Application):
     """
     global _app
     _app = app
+    configure_web_auth(getattr(app, "web_login_secret", "") or "")
     # Load download history into memory so WebUI shows completed tasks
     from module.download_stat import load_downloads
     load_downloads()
@@ -88,9 +226,37 @@ def init_web(app: Application):
         ).start()
 
 
+@_flask_app.route("/login", methods=["GET", "POST"])
+def login():
+    """Password page. The password is web_login_secret; there is no username."""
+    if _flask_app.config.get("LOGIN_DISABLED"):
+        if _wants_json():
+            return jsonify({"code": "1", "message": "login disabled"})
+        return redirect(url_for("index"))
+
+    next_url = _safe_next(request.values.get("next"))
+    if request.method == "GET" and current_user.is_authenticated:
+        return redirect(next_url)
+
+    error = ""
+    if request.method == "POST":
+        password = _extract_password()
+        if password is not None and _secret_matches(password):
+            login_user(User())
+            if _wants_json():
+                return jsonify({"code": "1"})
+            return redirect(next_url)
+        error = "登录密钥不正确"
+        if _wants_json():
+            return jsonify({"code": "0", "message": error}), 401
+
+    status = 401 if request.method == "POST" else 200
+    return render_template("login.html", error=error, next_url=next_url), status
+
+
 @_flask_app.route("/")
 def index():
-    """Index page - no login required"""
+    """Index page. Auth is enforced by before_request when web_login_secret is set."""
     return render_template("index.html")
 
 

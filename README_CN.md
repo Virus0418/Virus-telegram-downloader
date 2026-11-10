@@ -273,7 +273,7 @@ max_download_task: 5  # number of workers
 # WebUI
 web_host: 0.0.0.0
 web_port: 5000
-web_login_secret: 123
+web_login_secret: 123  # non-empty requires login for every page and API; empty disables it
 
 # Permissions
 allowed_user_ids:

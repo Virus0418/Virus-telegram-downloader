@@ -541,9 +541,12 @@ class Application:
             "after_upload_telegram_delete", self.after_upload_telegram_delete
         )
 
-        self.web_login_secret = str(
-            _config.get("web_login_secret", self.web_login_secret)
-        )
+        # null / missing stays empty (no login). Do not str(None) into the password "None".
+        raw_login_secret = _config.get("web_login_secret", self.web_login_secret)
+        if raw_login_secret is None:
+            self.web_login_secret = ""
+        else:
+            self.web_login_secret = str(raw_login_secret)
         self.debug_web = _config.get("debug_web", self.debug_web)
         self.log_level = _config.get("log_level", self.log_level)
 
