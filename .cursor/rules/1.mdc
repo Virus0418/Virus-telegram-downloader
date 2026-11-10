@@ -1,0 +1,36 @@
+---
+description: Virus-telegram-downloader 项目规则与优化记录
+alwaysApply: true
+---
+
+# 项目规则
+
+## 项目主要功能概述
+
+Telegram 媒体下载、转发和监听工具。Bot 收到链接或转发媒体后，把任务写入 `log/bot_tasks.json`（`download_state=pending`），由 `_pending_consumer_loop` 按并发上限喂给 worker。进程重启后可以恢复未完成任务，并带有 WebUI 和 FLOOD_WAIT 冷却。
+
+## 核心结构框架
+
+- `media_downloader.py`：进程入口和 worker 池
+- `module/bot.py`：Bot 命令、`start()`、`recover_tasks()`、pending 消费循环
+- `module/task_store.py`：任务持久化（`log/bot_tasks.json`）
+- `module/web.py`：WebUI
+- `module/download_stat.py`：下载进度和暂停状态
+- `module/app.py`：配置和任务节点
+- `tests/`：不连接真实 Telegram 会话的单元测试
+
+## 关键开发规范
+
+- 改动保持小而集中，不顺手重构无关的 pending 队列、FLOOD_WAIT 或 WebUI 鉴权
+- 新任务只落盘为 `pending`，由常驻消费循环取走；`direct_download` 不直接调用 `_consume_one_pending`
+- 默认分支是 `master`
+- 不修改 Docker / GHCR 工作流，除非修复本身依赖它
+- 单测沿用 `tests/test_*.py` 和 `unittest`，用 mock 代替真实 Telegram 会话
+
+## 优化记录
+
+### 冷启动时 pending 消费循环不启动
+
+- 目标：没有残留任务时，进程起来后 `_pending_consumer_loop` 也必须在跑，之后写入的 `download_state=pending` 任务能被消费
+- 做法：`start()` 无条件调用 `_ensure_pending_consumer_loop()`；`recover_tasks()` 在有残留任务时仍立刻 `_consume_one_pending`，并走同一个一次性守卫，避免循环被拉起两次
+- 要点：`recover_tasks()` 在 `get_running_tasks()` 为空时提前返回，不能再把循环启动只放在那条路径上

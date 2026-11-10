@@ -206,6 +206,9 @@ class DownloadBot:
         # Cache of message objects from direct_download so consumer can skip
         # get_messages. {task_id: pyrogram.Message}. Cleared on restart.
         self._cached_messages: dict = {}
+        # _pending_consumer_loop is started from start() and again from
+        # recover_tasks() when leftovers exist. This flag keeps that to one task.
+        self._pending_loop_started = False
 
     def gen_task_id(self) -> int:
         """Gen task id"""
@@ -310,6 +313,21 @@ class DownloadBot:
                             _bot.app.loop.create_task(_consume_one_pending())
             await asyncio.sleep(3)
 
+    def _ensure_pending_consumer_loop(self):
+        """Start the 2s pending consumer exactly once.
+
+        start() always calls this. A cold boot has no log/bot_tasks.json, and
+        recover_tasks() returns before it would start the loop, so a later
+        save_task(download_state=pending) would never be fed to workers.
+        recover_tasks() calls this again when leftovers exist; the flag makes
+        the second call a no-op.
+        """
+        if self._pending_loop_started:
+            return
+        self._pending_loop_started = True
+        self.app.loop.create_task(_pending_consumer_loop())
+        logger.info("Pending consumer loop started")
+
     async def recover_tasks(self):
         """Recover incomplete bot tasks from previous run.
         
@@ -356,10 +374,11 @@ class DownloadBot:
             except Exception:
                 pass
 
-            # Start periodic pending consumer loop (60s interval)
-            if not hasattr(self, "_pending_loop_started") or not self._pending_loop_started:
-                self.app.loop.create_task(_pending_consumer_loop())
-                self._pending_loop_started = True
+            # start() already armed the loop on a cold boot. Still call the
+            # helper so a recover path that runs without start() (or before
+            # the flag is set) cannot leave leftovers unconsumed, and cannot
+            # start a second loop.
+            self._ensure_pending_consumer_loop()
 
             # Kick off first consumption immediately
             self.app.loop.create_task(_consume_one_pending())
@@ -669,10 +688,16 @@ class DownloadBot:
         except Exception as e:
             logger.warning(f"Failed to send help message: {e}")
 
-        self.reply_task = _bot.app.loop.create_task(_bot.update_reply_message())
+        self.reply_task = self.app.loop.create_task(self.update_reply_message())
 
-        # Recover incomplete tasks from previous run
-        _bot.app.loop.create_task(_bot.recover_tasks())
+        # Always arm the consumer. recover_tasks() returns immediately when
+        # there is nothing to resume, and direct_download only persists a
+        # pending task — it does not call _consume_one_pending itself.
+        self._ensure_pending_consumer_loop()
+
+        # Recover incomplete tasks from previous run. Leftovers still get an
+        # immediate _consume_one_pending; the loop start above is idempotent.
+        self.app.loop.create_task(self.recover_tasks())
 
         self.bot.add_handler(
             MessageHandler(
