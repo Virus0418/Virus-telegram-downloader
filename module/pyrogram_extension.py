@@ -1388,18 +1388,23 @@ async def retry(func: Callable, args: tuple = (), max_attempts=3, wait_second=15
     :param wait_second: The wait time in seconds between each retry attempt.
         Defaults to 15.
 
-    :return: The result of the function
-    if it succeeds within the maximum number of attempts, otherwise None.
+    :return: The result of the function if it succeeds within the maximum
+        number of attempts, otherwise None. The wait is only between
+        attempts. After the final failure the function returns immediately.
     """
 
-    for _ in range(1, max_attempts + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             return await func(*args)
         except pyrogram.errors.exceptions.flood_420.FloodWait as wait_err:
             logger.warning("bad call retry: FlowWait {}", wait_err.value)
+            if attempt >= max_attempts:
+                break
             await asyncio.sleep(wait_err.value)
         except Exception as e:
             logger.exception("Error: {}", e)
+            if attempt >= max_attempts:
+                break
             await asyncio.sleep(wait_second)
 
     logger.error("Failed after {} attempts", max_attempts)

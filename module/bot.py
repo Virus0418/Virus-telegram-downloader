@@ -1500,83 +1500,16 @@ async def direct_download(
 async def download_forward_media(
     client: pyrogram.Client, message: pyrogram.types.Message
 ):
-    """
-    Downloads the media from a forwarded message.
+    """Download media already present on the message sent to the bot.
 
-    Parameters:
-        client (pyrogram.Client): The client instance.
-        message (pyrogram.types.Message): The message object.
-
-    Returns:
-        None
+    A forward into the bot chat is downloaded from that copy. The user
+    client is not asked for the source-channel original, and the same
+    source is not fetched again by link. This matches
+    tangyoha/telegram_media_downloader v2.2.5: reply immediately, then
+    queue the bot-chat message.
     """
 
     if message.media and getattr(message, message.media.value):
-        # If forwarded from a channel/group, download from source
-        if message.forward_from_chat:
-            source_chat_id = message.forward_from_chat.id
-            source_message_id = message.forward_from_message_id or 0
-            source_chat_title = message.forward_from_chat.title or ""
-
-            download_message = None
-            if source_message_id:
-                source_msg = await retry(
-                    _bot.client.get_messages,
-                    args=(source_chat_id, source_message_id),
-                )
-                if source_msg and source_msg.media:
-                    await direct_download(
-                        _bot, source_chat_id, message, source_msg, client,
-                        source_chat_id=source_chat_id,
-                        source_message_id=source_message_id,
-                        source_chat_title=source_chat_title,
-                    )
-                    return
-                # Source message deleted or no media — try link-based fetch
-                # The forwarded message's file reference may be stale. Construct
-                # a link and use parse_link → get_messages to get a fresh copy.
-                logger.info(
-                    f"Forward: source msg {source_message_id} has no media, "
-                    f"trying link-based fetch"
-                )
-                try:
-                    from module.pyrogram_extension import parse_link
-                    # Build source link: private channels use /c/, public use /username/
-                    fwd_chat = message.forward_from_chat
-                    if fwd_chat.username:
-                        link_str = f"https://t.me/{fwd_chat.username}/{source_message_id}"
-                    else:
-                        link_id = str(source_chat_id)
-                        if link_id.startswith("-100"):
-                            link_id = link_id[4:]
-                        link_str = f"https://t.me/c/{link_id}/{source_message_id}"
-                    link_chat_id, link_msg_id, _ = await parse_link(_bot.client, link_str)
-                    if link_chat_id and link_msg_id:
-                        download_message = await retry(
-                            _bot.client.get_messages,
-                            args=(link_chat_id, link_msg_id),
-                        )
-                        if download_message and download_message.media:
-                            logger.info(
-                                f"Forward: link-based fetch succeeded for "
-                                f"{link_chat_id}/{link_msg_id}"
-                            )
-                            await direct_download(
-                                _bot, link_chat_id, message, download_message, client,
-                                source_chat_id=source_chat_id,
-                                source_message_id=source_message_id,
-                                source_chat_title=source_chat_title,
-                            )
-                            return
-                except Exception as e:
-                    logger.warning(f"Forward: link-based fetch failed: {e}")
-
-            # All fallbacks failed — fall through to direct download with the
-            # original forwarded message (last resort)
-            await direct_download(_bot, message.from_user.id, message, message, client)
-            return
-
-        # Direct upload or forward from user (no source channel info)
         await direct_download(_bot, message.from_user.id, message, message, client)
         return
 

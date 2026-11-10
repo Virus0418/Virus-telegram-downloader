@@ -34,3 +34,9 @@ Telegram 媒体下载、转发和监听工具。Bot 收到链接或转发媒体�
 - 目标：没有残留任务时，进程起来后 `_pending_consumer_loop` 也必须在跑，之后写入的 `download_state=pending` 任务能被消费
 - 做法：`start()` 无条件调用 `_ensure_pending_consumer_loop()`；`recover_tasks()` 在有残留任务时仍立刻 `_consume_one_pending`，并走同一个一次性守卫，避免循环被拉起两次
 - 要点：`recover_tasks()` 在 `get_running_tasks()` 为空时提前返回，不能再把循环启动只放在那条路径上
+
+### 转发媒体直接下载机器人会话里的副本
+
+- 目标：转发文件后立刻回复 “Direct download...”，并排队下载机器人已经收到的那份文件。不再先等源频道拉取
+- 做法：`download_forward_media` 在消息自身带媒体时，立刻把这条 bot 消息交给 `direct_download`。不调用 user client 的 `get_messages`，也不拼 t.me 链接再取一次。与 tangyoha/telegram_media_downloader v2.2.5 相同
+- 要点：不要在回复之后再后台补拉原件。`retry()` 最后一次失败后不再 sleep。源频道失败被记成 “has no media” 的那条日志随这条路径一起删除，避免把 API 失败说成消息没有媒体
