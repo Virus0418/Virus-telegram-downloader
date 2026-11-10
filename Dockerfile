@@ -8,9 +8,6 @@ RUN apk add --no-cache --virtual .build-deps gcc musl-dev
 # Install python deps
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir \
-    --trusted-host pypi.org \
-    --trusted-host files.pythonhosted.org \
-    --trusted-host pypi.python.org \
     -r requirements.txt
 
 # Install rclone (runtime binary)
@@ -20,6 +17,9 @@ RUN apk add --no-cache rclone
 FROM python:3.11.9-alpine AS runtime
 
 WORKDIR /app
+
+# TZ=Asia/Shanghai (see docker-compose) needs the zoneinfo database.
+RUN apk add --no-cache tzdata
 
 # Copy installed deps from build stage
 COPY --from=build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages

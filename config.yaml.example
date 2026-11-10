@@ -40,6 +40,7 @@ file_name_prefix:
 max_download_task: 5
 web_host: 0.0.0.0
 web_port: 5000
+# 非空则 WebUI 全部页面和 API 需要登录；留空则不启用登录。请把 123 换成自己的密钥
 web_login_secret: 123
 allowed_user_ids:
 - 'me'

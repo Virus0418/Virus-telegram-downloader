@@ -273,7 +273,7 @@ max_download_task: 5  # worker 数量
 # WebUI
 web_host: 0.0.0.0
 web_port: 5000
-web_login_secret: 123  # 登录密钥（当前未强制验证）
+web_login_secret: 123  # 登录密钥；非空则所有页面和 API 都要登录，留空则不启用。请改掉示例值
 
 # 权限
 allowed_user_ids:
